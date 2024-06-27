@@ -38,4 +38,7 @@ demand_mean_group <- df_1 %>%
   summarise(MeanDemand=mean(demand),.groups="drop") 
 demand_mean_group
 
-
+#Nota: Para la realización del desafío me he enfocado en las consignas y aplicado
+#lo visto en clases, no obstante para el proyecto final muy posiblemente
+#las transformaciones serán ajustadas y reorganizadas considerando el avance del 
+#curso y las especificaciones del citado proyecto. 
