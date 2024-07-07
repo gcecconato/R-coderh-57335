@@ -1,0 +1,181 @@
+---
+title: "Análisis de datos de precio y demanda de electricidad"
+author: "Gabriel Cecconato"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+
+```{r librerias, echo=FALSE, warning=FALSE}
+library(dbplyr)
+library(tidyverse)
+library(ggplot2)
+library(DT)
+```
+
+
+```{r Dataset, echo=FALSE, warning=FALSE}
+ds_edva <- read.csv("electr-demand-victoria-australia-57335-Cecconato.csv")
+
+```
+
+
+# Acerca del conjuntos de datos
+
+El conjunto de datos contiene el precio diario, demanda y datos meteorológicos en el segundo estado más grande de Australia. El mismo es público y fue obtenido de https://www.kaggle.com/datasets/aramacus/electricity-demand-in-victoria-australia.
+
+Según la fuente en 2020, 6,7 millones de personas residen en Victoria, el segundo estado más poblado de Australia. La mayoría de ellos, cinco millones, viven o trabajan en Melbourne, la capital del estado. Durante 2020, Australia fue uno de los primeros en cerrar fronteras internacionales, seguido de un cierre de fronteras interestatales. Victoria introdujo algunas de las restricciones más estrictas a la actividad empresarial relacionadas con la pandemia, lo que provocó que una parte importante de su población trabajara desde casa.
+
+En el citado conjunto de datos hay `r nrow(ds_edva)` observaciones y `r ncol(ds_edva)` variables, y su estructura es la siguiente:
+
+```{r estrutura, echo=FALSE}
+str(ds_edva)
+```
+
+## Descripción de las variables 
+
+1. **date**: fecha del registro.
+2. **demand**: demanda total diaria de electricidad en MWh.
+3. **RRP**: precio de venta recomendado en AUD$/MWh.
+4. **demand_pos_RRP**: demanda diaria total con un **RRP** positivo en MWh.
+5. **RRP_positive**:  **RRP** positivo promedio, ponderado por la demanda intradiaria correspondiente en AUD$/MWh.
+6. **demand_neg_RRP**: demanda diaria total con un **RRP** negativo en MWh.
+7. **RRP_negative**: **RRP** negativo promedio, ponderado por la demanda intradiaria correspondiente en AUD$/MWh.
+8. **frac_at_neg_RRP**: una fracción del día en que la demanda se negoció a un **RRP** negativo.
+9. **min_temperature**: temperatura mínima durante el día en grados Celsius.
+10. **max_temperature**: temperatura máxima durante el día en grados Celsius.
+11. **solar_exposure** : energía solar diaria total en MJ/m^2^.
+12. **rainfall**: precipitación diaria en mm.
+13. **school_day**: si los estudiantes estaban en la escuela ese día (Y=sí, N=no).
+14. **holiday**: si el día era feriado estatal o nacional (Y=sí, N=no).
+
+```{r crear una copia, echo=FALSE}
+ds_edva_copy <- ds_edva
+```
+
+## Modificación de tipos de datos 
+
+Convertimos los tipos de datos de algunas variables del conjunto de datos. La variable **date** al tipo *Date* (fecha) y las variables **school_day** y **holiday** al tipo *Factor* (categórica). Así la estructura de datos queda:
+
+```{r convertir de character a fecha o factor, echo=FALSE}
+ds_edva_copy <- ds_edva_copy %>%
+  mutate(date = as.Date(date),
+         across(.cols = c(school_day, holiday), .fns = factor))
+str(ds_edva_copy)
+```
+
+## Datos faltantes
+
+Analizamos junto con las dimensiones del conjunto de datos la cantidad total de datos faltantes y su desagregación por variable.
+
+```{r Data faltantes, echo=FALSE, warning=FALSE}
+
+#Creamos función que describa las dimensiones del dataset como así tambíen
+#si existen datos NA.
+ds_dim_na <- function(dataset)
+{
+  dimension <- dim(dataset)
+  total_na <- sum(is.na(dataset))
+  mensaje <- list(
+                  'Dimensiones del conjunto de datos (observaciones y variables):' = dimension, 
+                  'cantidad datos faltantes:' = total_na
+                 )
+  return(mensaje)
+}
+
+print(ds_dim_na(ds_edva_copy))
+# Contar datos faltantes por variable
+missing_values <- colSums(is.na(ds_edva_copy))
+
+# Mostrar la cantidad de datos faltantes por variable
+print(missing_values)
+```
+
+Se observa que los datos faltantes son relativamente pocos. Sólo hay datos faltantes en las variables **solar_exposure** (1 observación) y **rainfall** (3 observaciones). Por la cuantía relativa podría optarse por descartar tales observaciones, no obstante ya que en total son `r nrow(ds_edva)` observaciones y a los fines didácticos se realizará la imputación de los datos faltantes con su respectiva mediana.
+
+
+```{r mediana_edad, echo=TRUE}
+ds_edva_copy <- ds_edva_copy %>%
+  mutate(solar_exposure = 
+         replace_na(solar_exposure, median(solar_exposure, na.rm = TRUE)),
+         rainfall = 
+         replace_na(rainfall, median(rainfall, na.rm = TRUE)),
+         )  
+```
+
+# Resumen de datos
+
+Presentamos un resumen del conjunto de datos con métricas relevantes por cada variable. Y debido a la imputación de los datos faltantes ya implementada, no se observan datos faltantes para ninguna de las variables.  
+
+```{r Summary, echo=TRUE, warning=FALSE}
+# Hacemos un summary, con lapply que sale en formato de lista y se lee mejor
+lapply(ds_edva_copy,summary)
+```
+
+# Análisis de relaciones entre variables
+
+Presentamos a continuación un gráfico de líneas suavizadas con intervalos de confianza sombreados donde en el eje horizontal están los meses de la variable **fecha**, en el eje vertical la **demanda** y cada año de la variable **fecha** diferenciado por distintos colores. 
+
+Como se puede apreciar hay una estacionalidad marcada en la **demanda** registando picos en los los meses de invierno y de verano (y valles en las estaciones de transición, primavera y otoño). En particular se puede observar que hay una caída de la **demanda** para el año 2020 (no obstante, el abrupto declive hacia los meses finales se debe a que el conjunto de datos posee observaciones de fecha hasta el 06/10/2020).
+
+```{r gráfico de líneas suavizadas,echo=FALSE, warning=FALSE}
+#creamos una variable nueva como factor en base al año de la fecha
+ds_edva_copy <- ds_edva_copy %>%
+  mutate(year = as.factor(year(date)))
+
+#graficamos de manda 
+#con límites en el eje x para el mes considerando los 12 meses del año 
+#abiertos por trimestre
+ggplot(data = ds_edva_copy) +
+  geom_smooth(mapping = aes(x=month(date), y=demand, color= year)
+  ) +
+  ylab("Demanda")+ # eje y
+  scale_x_continuous(name = "Mes", limits = c(1, 12), breaks = seq(0, 12, by = 3)) +
+  labs(title = "Demanda por mes en cada año")
+```
+
+Y a continuación el promedio de la demanda agrupada por año (*year*). Podemos visualizar su tendencia levemente decreciente.
+
+```{r summarise group by,echo=FALSE, warning=FALSE}
+demand_mean_group <- ds_edva_copy %>% 
+  group_by(year) %>% 
+  summarise("Promedio Demand"=mean(demand),.groups="drop") 
+demand_mean_group
+
+```
+
+Por otro lado si relacionamos demanda con día feriado y luego con día escolar, podemos observar una demanda sensiblemente mayor en días que no son feriados, y para el caso de día escolar si bien también es mayor relativamente lo es en menor medida. 
+
+```{r boxplots demanda y factores,echo=FALSE, warning=FALSE}
+ggplot(ds_edva_copy) + 
+  geom_boxplot(aes(x=holiday, y=demand)) + 
+  coord_flip()+
+  xlab(" ")+ # eje x
+  ylab("Demanda")+ # eje y
+  labs(title = "Relación entre día feriado y demanda")
+
+
+ggplot(ds_edva_copy) + 
+  geom_boxplot(aes(x=school_day, y=demand)) + 
+  coord_flip()+
+  xlab(" ")+ # eje x
+  ylab("Demanda")+ # eje y
+  labs(title = "Relación entre día escolar y demanda")
+```
+
+
+# Anexo
+
+```{r tabla interactiva,echo=FALSE, warning=FALSE}
+# Crear tabla interactiva
+datatable(ds_edva_copy, 
+          options = list(pageLength = 10), 
+          caption = "Conjunto de datos precio diario, demanda y datos meteorológicos en el Estado de Victoria (Australia)  - Tabla Interactiva")
+```
