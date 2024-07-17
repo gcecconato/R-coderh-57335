@@ -1,0 +1,189 @@
+---
+title: "Análisis de PCA de precio y demanda de electricidad"
+author: "Gabriel Cecconato"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+
+```{r librerias, echo=FALSE, warning=FALSE}
+library(dbplyr)
+library(tidyverse)
+library(ggplot2)
+library(devtools)
+library(ggbiplot)
+library(ggfortify)
+library(FactoMineR)
+library(factoextra)
+```
+
+
+# Descripción del análisis a realizar 
+
+El análisis de los componentes principales (*PCA, Principal Component Analysis*) es un método estadístico que utiliza autovalores y autovectores para convertir los conjuntos de observaciones a un conjunto de variables linealmente no correlacionadas, denominadas como **componentes principales**.
+
+Se realiza para tomar un conjunto de datos de muchas dimensiones y reducir las mismas a un número más manejable, extraer las variables más importantes y encontrar aquellas que logran explicar la máxima variación en el conjunto de datos.
+
+# Acerca del conjuntos de datos
+
+```{r Dataset, echo=FALSE, warning=FALSE}
+ds_edva <- read.csv("electr-demand-victoria-australia-57335-Cecconato.csv")
+
+```
+
+El conjunto de datos contiene el precio diario, demanda y datos meteorológicos en el segundo estado más grande de Australia. El mismo es público y fue obtenido de https://www.kaggle.com/datasets/aramacus/electricity-demand-in-victoria-australia.
+
+Según la fuente en 2020, 6,7 millones de personas residen en Victoria, el segundo estado más poblado de Australia. La mayoría de ellos, cinco millones, viven o trabajan en Melbourne, la capital del estado. Durante 2020, Australia fue uno de los primeros en cerrar fronteras internacionales, seguido de un cierre de fronteras interestatales. Victoria introdujo algunas de las restricciones más estrictas a la actividad empresarial relacionadas con la pandemia, lo que provocó que una parte importante de su población trabajara desde casa.
+
+En el citado conjunto de datos hay `r nrow(ds_edva)` observaciones y `r ncol(ds_edva)` variables, y su estructura es la siguiente:
+
+```{r estrutura, echo=FALSE}
+str(ds_edva)
+```
+
+## Descripción de las variables 
+
+1. **date**: fecha de la observación.
+2. **demand**: demanda total diaria de electricidad en MWh.
+3. **RRP**: precio de venta recomendado en AUD$/MWh.
+4. **demand_pos_RRP**: demanda diaria total con un **RRP** positivo en MWh.
+5. **RRP_positive**:  **RRP** positivo promedio, ponderado por la demanda intradiaria correspondiente en AUD$/MWh.
+6. **demand_neg_RRP**: demanda diaria total con un **RRP** negativo en MWh.
+7. **RRP_negative**: **RRP** negativo promedio, ponderado por la demanda intradiaria correspondiente en AUD$/MWh.
+8. **frac_at_neg_RRP**: una fracción del día en que la demanda se negoció a un **RRP** negativo.
+9. **min_temperature**: temperatura mínima durante el día en grados Celsius.
+10. **max_temperature**: temperatura máxima durante el día en grados Celsius.
+11. **solar_exposure** : energía solar diaria total en MJ/m^2^.
+12. **rainfall**: precipitación diaria en mm.
+13. **school_day**: si los estudiantes estaban en la escuela ese día (Y=sí, N=no).
+14. **holiday**: si el día era feriado estatal o nacional (Y=sí, N=no).
+
+```{r crear una copia, echo=FALSE}
+ds_edva_copy <- ds_edva
+```
+
+# Acondicionamiento del conjunto de datos
+
+Puesto que para implementar el **PCA** el conjunto de datos debe cumplir con los requisitos de que todas las variables de las observacioens deben ser numéricas y que no haya datos faltantes, se realizará un acondicioamiento previo según se detalla seguidamente.
+
+## Modificación de tipos de datos 
+
+Convertimos los tipos de datos de algunas variables del conjunto de datos. La variables **date**,  **school_day** y **holiday** no son numéricas. 
+
+* Puesto que las obsrvaciones están por fecha, asignaremos el valor de **date** a los nombres de las observaciones (filas) del conjunto de datos, y luego la eliminaremos.
+* En cuanto a las variables **school_day** y **holiday** las convertiremos a numéricas (asignando 1 para "Y" y 0 para "N").
+
+Así la estructura de datos queda:
+
+```{r convertir de character a fecha o factor, echo=FALSE}
+rownames(ds_edva_copy) <- ds_edva_copy$date
+
+ds_edva_copy <- ds_edva_copy %>% 
+  select(-date) %>% 
+  mutate(school_day = case_when(
+    school_day == "N" ~ 0,
+    school_day == "Y" ~ 1,
+  ),holiday = case_when(
+    holiday == "N" ~ 0,
+    holiday == "Y" ~ 1,
+  ))
+
+str(ds_edva_copy)
+```
+
+Y la vista de las primeras filas del conjunto de datos así:
+
+```{r, , echo=FALSE}
+head(ds_edva_copy)
+```
+
+## Datos faltantes
+
+Analizamos el conjunto de datos y encontramos `r sum(is.na(ds_edva_copy))` datos faltantes con la siguiente desagregación por variable:
+
+```{r Data faltantes, echo=FALSE, warning=FALSE}
+# Contar datos faltantes por variable
+missing_values <- colSums(is.na(ds_edva_copy))
+
+# Mostrar la cantidad de datos faltantes por variable
+print(missing_values)
+```
+
+Se realizará la imputación de los datos faltantes con su respectiva mediana:
+
+```{r mediana_edad, echo=TRUE}
+ds_edva_copy <- ds_edva_copy %>%
+  mutate(solar_exposure = 
+         replace_na(solar_exposure, median(solar_exposure, na.rm = TRUE)),
+         rainfall = 
+         replace_na(rainfall, median(rainfall, na.rm = TRUE)),
+         )  
+```
+
+Presentamos un resumen del conjunto de datos con métricas relevantes por cada variable. Y debido a la imputación de los datos faltantes ya implementada, no se observan datos faltantes para ninguna de las variables.  
+
+```{r Summary, echo=TRUE, warning=FALSE}
+# Hacemos un summary, con lapply que sale en formato de lista y se lee mejor
+lapply(ds_edva_copy,summary)
+```
+
+# Implementación de PCA
+
+Procedemos a implementar **PCA** mediante la función *prcomp* con el parámetro scale para normalizar las variables y poder comprarlas entre si. Obtendremos por lo tanto la misma cantidad de componentes principales que la cantidad de variables del conjunto de datos (`r ncol(ds_edva_copy)`):
+
+```{r PCA, echo=TRUE, warning=FALSE}
+pca_ds_edva_copy <- prcomp(ds_edva_copy, center = TRUE , scale = TRUE)
+pca_ds_edva_copy
+```
+
+Y seguidamente presentamos un resumen de **PCA** con la desviación estándard, la proporción de la varianza y el acumulado de esta última.
+
+```{r PCA Summary, echo=FALSE, warning=FALSE}
+# Hacemos un summary, con lapply que sale en formato de lista y se lee mejor
+summary(pca_ds_edva_copy)
+```
+
+## Análisis de resultados
+
+Graficamos las dos componentes con mayor preponderancia, PCA 1 y PCA 2, que conjuntamente acumulan aproximadamente un 41% de la proporción de la varianza.
+
+```{r Plot PCA 1 y 2, echo=FALSE, warning=FALSE}
+plot(pca_ds_edva_copy$x[,1], pca_ds_edva_copy$x[,2], 
+     main="Correlación entre el primer par de componentes principales", 
+     xlab = "PCA 1", ylab = "PCA 2")
+```
+
+Seguidamente determinamos autovalores y autovectores para obtener un gráfico de barras para visualizar la variación porcentual por cada componente principal (Bar Scree Plot). 
+
+```{r BarPlot PCA, echo=FALSE, warning=FALSE}
+# Autovalores y autovectores
+autovectores <- pca_ds_edva_copy$rotation 
+autovalores <- pca_ds_edva_copy$sdev * pca_ds_edva_copy$sdev
+
+# Calculo porcentaje explicado
+pca_var_pct <- round(autovalores / sum(autovalores)*100, digits = 2)
+barplot(pca_var_pct, main = "Bar Scree Plot", xlab = "Componente Principal", ylab = "Variacion Porcentual")
+```
+
+Determinamos las correlaciones entre el conjunto de datos original y las componentes principales:
+
+```{r Correl PCA, echo=FALSE, warning=FALSE}
+round(cor(ds_edva_copy, pca_ds_edva_copy$x), digits = 3)
+```
+
+Nuevamente graficamos el *Scree Plot*, aunque en esta oportunidad con forma de líneas, con lo cual aplicamos la “Regla del codo” para elegir la cantidad de componentes para reducir el conjunto de datos en el que tan solo bastaría entre 4 o 5. Más de 5 ofrecerían menores rendimientos explicativos.
+
+```{r ScreePlot PCA, echo=FALSE, warning=FALSE}
+screeplot(pca_ds_edva_copy, type = "l", main = "Scree Plot")
+```
+
+
